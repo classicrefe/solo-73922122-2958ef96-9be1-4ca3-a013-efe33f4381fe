@@ -1,31 +1,37 @@
 """FastAPI 应用：疾控汇总发布安全审查台。
 
 页面：
-- GET /        内部审查台（导入、预览、发布；可见原始格值）
-- GET /public  公开页（仅人数与获准汇总，无格内检出数）
+- GET /        内部审查台（导入、预览、发布、下载回执；可见原始格值）
+- GET /public  公开页（仅人数与获准汇总，无格内检出数；可粘贴回执核验）
 
 接口：
-- POST /api/import     导入调查 CSV（仅允许一次，导入后不可更换）
-- GET  /api/admin/state 内部状态（含格内检出数）
-- POST /api/preview    预览交集检出总数并做安全评估
-- POST /api/publish    确认发布（按最新公开记录重核后原子写入）
-- GET  /api/public     公开数据（人数 + 获准汇总）
+- POST /api/import        导入调查 CSV（仅允许一次，导入后不可更换）
+- GET  /api/admin/state   内部状态（含格内检出数）
+- POST /api/preview       预览交集检出总数并做安全评估
+- POST /api/publish       确认发布（按最新公开记录重核后，记录与回执同事务原子写入）
+- GET  /api/public        公开数据（人数 + 获准汇总 + 回执状态）
+- GET  /api/receipt/{id}  下载某条已签发布的回执（JSON，公开安全）
+- POST /api/verify        粘贴回执核验：逐条对照签发链与库内记录
 """
 
 import asyncio
 import csv
 import io
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from . import receipts
 from .database import (
     get_cells,
+    get_publication,
     get_publications,
+    has_signed_records,
     init_db,
     insert_cells,
     insert_publication,
@@ -41,8 +47,13 @@ MIN_POPULATION = 5
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI):
+async def lifespan(app: FastAPI):
     init_db()
+    # 回执密钥：首次启动生成并保存在数据库之外，重启沿用；
+    # 密钥丢失且已有已签记录时抛出 KeyLostError，应用明确启动失败。
+    app.state.receipt_key = receipts.load_or_create_key(
+        has_signed_records=has_signed_records()
+    )
     yield
 
 
@@ -122,6 +133,10 @@ def parse_survey_csv(text: str) -> list[dict]:
 class Selection(BaseModel):
     districts: list[str] = Field(default_factory=list)
     age_groups: list[str] = Field(default_factory=list)
+
+
+class VerifyRequest(BaseModel):
+    receipt_text: str = Field(..., description="粘贴的回执 JSON 文本")
 
 
 # ---------------- 工具 ----------------
@@ -241,7 +256,10 @@ async def publish(sel: Selection):
                 },
             )
         try:
-            pub = insert_publication(sel.districts, sel.age_groups, total)
+            # 发布记录与回执在同一事务落库；任一失败整体回滚，不留单边结果。
+            pub = insert_publication(
+                sel.districts, sel.age_groups, total, app.state.receipt_key
+            )
         except Exception:
             # 单事务写入，失败即回滚，不会留下半次发布。
             raise HTTPException(500, "保存失败，未产生任何发布记录")
@@ -250,7 +268,7 @@ async def publish(sel: Selection):
 
 @app.get("/api/public")
 def public_data():
-    """公开数据：仅人数与获准汇总，绝不包含格内检出数。"""
+    """公开数据：仅人数与获准汇总（含回执状态），绝不包含格内检出数。"""
     cells = get_cells()
     return {
         "imported": bool(cells),
@@ -264,3 +282,41 @@ def public_data():
         ],
         "publications": get_publications(),
     }
+
+
+@app.get("/api/receipt/{pid}")
+def download_receipt(pid: int):
+    """下载某条已签发布的回执（仅含公开信息：范围、总数、时间、链上摘要）。"""
+    pub = get_publication(pid)
+    if pub is None:
+        raise HTTPException(404, f"不存在第 #{pid} 条发布记录")
+    if not pub["signed"]:
+        raise HTTPException(409, f"第 #{pid} 条是未签旧记录，没有回执")
+    doc = receipts.build_receipt_doc(pub)
+    return JSONResponse(
+        doc,
+        headers={
+            "Content-Disposition": f'attachment; filename="receipt-{pid}.json"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.post("/api/verify")
+def verify(req: VerifyRequest):
+    """核验回执：逐条对照签发链与库内记录，报告首处缺失/篡改/断链。
+
+    仅使用公开数据与回执密钥，不接触格内检出数。
+    """
+    try:
+        doc = json.loads(req.receipt_text)
+    except json.JSONDecodeError as e:
+        return {
+            "ok": False,
+            "failure": {
+                "kind": "invalid_receipt_doc",
+                "message": f"回执不是有效的 JSON：{e}",
+            },
+            "steps": [],
+        }
+    return receipts.verify_receipt(doc, app.state.receipt_key, get_publications())

@@ -15,6 +15,12 @@
   th,td{border:1px solid #dde3ea;padding:6px 12px;font-size:14px;text-align:center}
   th{background:#eef2f6}
   .hint{font-size:13px;color:#667}
+  textarea{width:100%;box-sizing:border-box;min-height:140px;font-family:ui-monospace,monospace;font-size:12px;padding:8px;border:1px solid #ccd4dc;border-radius:6px}
+  button{background:#2e6b4f;color:#fff;border:0;border-radius:6px;padding:8px 16px;font-size:14px;cursor:pointer;margin-top:8px}
+  .msg{margin-top:12px;padding:10px 12px;border-radius:6px;font-size:14px;white-space:pre-wrap;display:none}
+  .msg.ok{display:block;background:#e6f6e8;border:1px solid #9ed3a7}
+  .msg.err{display:block;background:#fdecea;border:1px solid #f2b8b0}
+  .steps{font-size:13px;color:#445;margin-top:8px}
 </style>
 </head>
 <body>
@@ -26,8 +32,17 @@
   </section>
   <section>
     <h2>已获准公开的汇总</h2>
-    <p class="hint">本页仅提供人数与获准汇总，不提供各格检出数。</p>
+    <p class="hint">本页仅提供人数与获准汇总，不提供各格检出数。已签记录可下载回执留存；未签记录为旧发布，不能当作已核验。</p>
     <div id="pubs"></div>
+  </section>
+  <section>
+    <h2>回执核验</h2>
+    <p class="hint">粘贴发布时下载留存的回执 JSON，逐条对照签发链与库内记录；若公开记录被改动、删除或断链，将报告首处问题。</p>
+    <textarea id="receiptText" placeholder='粘贴回执 JSON，例如 {"version":1,"publication_id":1,...}'></textarea>
+    <br>
+    <button onclick="doVerify()">核验回执</button>
+    <div id="verifyMsg" class="msg"></div>
+    <div id="verifySteps" class="steps"></div>
   </section>
 </main>
 <script>
@@ -49,10 +64,42 @@ async function load(){
   document.getElementById('grid').innerHTML = h + '</table>';
 
   document.getElementById('pubs').innerHTML = r.publications.length
-    ? '<table><tr><th>#</th><th>分区</th><th>年龄组</th><th>检出总数</th><th>发布时间 (UTC)</th></tr>'
-      + r.publications.map(p => `<tr><td>${p.id}</td><td>${esc(p.districts.join('、'))}</td><td>${esc(p.age_groups.join('、'))}</td><td>${p.total}</td><td>${esc(p.created_at)}</td></tr>`).join('')
+    ? '<table><tr><th>#</th><th>分区</th><th>年龄组</th><th>检出总数</th><th>发布时间 (UTC)</th><th>回执</th></tr>'
+      + r.publications.map(p => `<tr><td>${p.id}</td><td>${esc(p.districts.join('、'))}</td><td>${esc(p.age_groups.join('、'))}</td><td>${p.total}</td><td>${esc(p.created_at)}</td>`
+        + (p.signed
+          ? `<td>已签 · <a href="/api/receipt/${p.id}" download>下载回执</a></td>`
+          : '<td>未签（旧记录）</td>')
+        + '</tr>').join('')
       + '</table>'
     : '<p class="hint">暂无公开汇总</p>';
+}
+async function doVerify(){
+  const msg = document.getElementById('verifyMsg');
+  const stepsEl = document.getElementById('verifySteps');
+  stepsEl.textContent = '';
+  const text = document.getElementById('receiptText').value.trim();
+  if(!text){ msg.className = 'msg err'; msg.textContent = '请先粘贴回执 JSON'; return; }
+  let r;
+  try{
+    const resp = await fetch('/api/verify', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({receipt_text: text}),
+    });
+    r = await resp.json();
+  }catch(e){
+    msg.className = 'msg err'; msg.textContent = '核验请求失败：' + e; return;
+  }
+  if(r.ok){
+    msg.className = 'msg ok';
+    msg.textContent = `核验通过：回执与第 #${r.verified_publication_id} 条发布记录一致，`
+      + `自链首共 ${r.chain_length} 条已签记录逐条核验无误，签发链完整。`;
+  }else{
+    msg.className = 'msg err';
+    msg.textContent = '核验未通过：' + (r.failure ? r.failure.message : '未知原因');
+  }
+  if(r.steps && r.steps.length){
+    stepsEl.textContent = '逐条核验：' + r.steps.map(s => `#${s.publication_id} 通过`).join('；');
+  }
 }
 load();
 </script>

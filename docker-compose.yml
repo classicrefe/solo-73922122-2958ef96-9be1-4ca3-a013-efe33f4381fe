@@ -6,8 +6,9 @@ services:
       - "8000:8000"
     environment:
       - DB_PATH=/data/app.db
+      - RECEIPT_KEY_PATH=/data/receipt.key   # 回执密钥：数据库之外的独立文件
     volumes:
-      - app_data:/data   # SQLite 持久化：公开记录重启保留
+      - app_data:/data   # SQLite 库与回执密钥持久化：重启保留公开记录与签发链
     restart: unless-stopped
 
 volumes:

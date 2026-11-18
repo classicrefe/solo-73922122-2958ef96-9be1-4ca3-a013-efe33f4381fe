@@ -59,7 +59,14 @@
 
   <section id="pubSec" class="hidden">
     <h2>4. 已公开记录（不可撤销）</h2>
+    <p class="hint">每条新发布在落库时签发回执（HMAC 链）。复核者下载留存回执后，可在公开页粘贴核验，识别公开记录是否被改动。</p>
     <div id="pubs"></div>
+  </section>
+  <section id="receiptSec" class="hidden">
+    <h2>5. 本次发布回执（请下载留存）</h2>
+    <p class="hint">回执由本地密钥对「发布ID、所选范围、总数、发布时间、前一回执摘要」计算 HMAC 得出，供日后在公开页核验。</p>
+    <p><a id="receiptDl" href="#" download>下载回执 JSON</a></p>
+    <pre id="receiptJson" style="background:#f6f8fa;border:1px solid #dde3ea;border-radius:6px;padding:10px;font-size:12px;overflow:auto"></pre>
   </section>
 </main>
 <script>
@@ -116,8 +123,12 @@ function render(){
 
   const pubs = state.publications;
   document.getElementById('pubs').innerHTML = pubs.length
-    ? '<table><tr><th>#</th><th>分区</th><th>年龄组</th><th>检出总数</th><th>发布时间 (UTC)</th></tr>'
-      + pubs.map(p => `<tr><td>${p.id}</td><td>${esc(p.districts.join('、'))}</td><td>${esc(p.age_groups.join('、'))}</td><td>${p.total}</td><td>${esc(p.created_at)}</td></tr>`).join('')
+    ? '<table><tr><th>#</th><th>分区</th><th>年龄组</th><th>检出总数</th><th>发布时间 (UTC)</th><th>回执</th></tr>'
+      + pubs.map(p => `<tr><td>${p.id}</td><td>${esc(p.districts.join('、'))}</td><td>${esc(p.age_groups.join('、'))}</td><td>${p.total}</td><td>${esc(p.created_at)}</td>`
+        + (p.signed
+          ? `<td>已签 · <a href="/api/receipt/${p.id}" download>下载回执</a></td>`
+          : '<td>未签（旧记录）</td>')
+        + '</tr>').join('')
       + '</table>'
     : '<p class="hint">暂无公开记录</p>';
 }
@@ -172,7 +183,15 @@ async function doPublish(){
   try{
     const r = await api('/api/publish', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(selection())});
     el.className = 'msg ok';
-    el.textContent = `已发布 #${r.id}：检出总数 ${r.total}（${esc(r.created_at)}）`;
+    el.textContent = `已发布 #${r.id}：检出总数 ${r.total}（${esc(r.created_at)}），回执已签发。`;
+    const doc = {
+      version: 1, publication_id: r.id, districts: r.districts, age_groups: r.age_groups,
+      total: r.total, created_at: r.created_at, prev_receipt: r.prev_receipt, receipt: r.receipt,
+    };
+    document.getElementById('receiptJson').textContent = JSON.stringify(doc, null, 2);
+    document.getElementById('receiptDl').href = '/api/receipt/' + r.id;
+    document.getElementById('receiptDl').download = 'receipt-' + r.id + '.json';
+    document.getElementById('receiptSec').classList.remove('hidden');
     await load();
   }catch(e){ showErr(el, e); }
 }
